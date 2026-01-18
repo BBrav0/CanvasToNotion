@@ -60,24 +60,57 @@ def get_canvas_assignments(course_id):
 
 
 def get_existing_notion_assignments():
-    """Get all assignments already in Notion to avoid duplicates."""
+    """Get all assignments already in Notion with their page IDs and completion status."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB}/query"
     
     response = requests.post(url, headers=notion_headers, json={})
     response.raise_for_status()
     
-    existing = set()
+    existing = {}
     for page in response.json().get("results", []):
         props = page.get("properties", {})
         title_prop = props.get("Assignment", {}).get("title", [])
         if title_prop:
             title = title_prop[0].get("plain_text", "")
-            existing.add(title)
+            completed = props.get("Completed", {}).get("checkbox", False)
+            existing[title] = {
+                "page_id": page.get("id"),
+                "completed": completed
+            }
     
     return existing
 
 
-def create_notion_assignment(assignment_name, course_name, due_date):
+def get_canvas_submission(course_id, assignment_id):
+    """Check if an assignment has been submitted."""
+    url = f"{CANVAS_BASE}/courses/{course_id}/assignments/{assignment_id}/submissions/self"
+    
+    response = requests.get(url, headers=canvas_headers)
+    response.raise_for_status()
+    
+    submission = response.json()
+    # Check if there's a submission (workflow_state will be 'submitted' or 'graded')
+    workflow_state = submission.get("workflow_state", "")
+    return workflow_state in ["submitted", "graded", "pending_review"]
+
+
+def mark_notion_assignment_completed(page_id):
+    """Mark an assignment as completed in Notion."""
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    
+    payload = {
+        "properties": {
+            "Completed": {"checkbox": True}
+        }
+    }
+    
+    response = requests.patch(url, headers=notion_headers, json=payload)
+    response.raise_for_status()
+    
+    return response.json()
+
+
+def create_notion_assignment(assignment_name, course_name, due_date, is_submitted=False):
     """Create a new assignment in Notion."""
     url = "https://api.notion.com/v1/pages"
     
@@ -90,7 +123,7 @@ def create_notion_assignment(assignment_name, course_name, due_date):
             "select": {"name": course_name}
         },
         "Completed": {
-            "checkbox": False
+            "checkbox": is_submitted
         }
     }
     
@@ -163,6 +196,7 @@ def sync():
     
     added = 0
     skipped = 0
+    marked_complete = 0
     
     for course in courses:
         course_name = course.get("name", "Unknown Course")
@@ -178,25 +212,42 @@ def sync():
         for assignment in assignments:
             name = assignment.get("name", "Untitled Assignment")
             due_at = assignment.get("due_at")
+            assignment_id = assignment.get("id")
             
-            # Skip if already exists
+            # Check if submitted in Canvas
+            try:
+                is_submitted = get_canvas_submission(course_id, assignment_id)
+            except requests.exceptions.HTTPError:
+                is_submitted = False
+            
+            # Check if already exists in Notion
             if name in existing:
-                skipped += 1
+                # If submitted but not marked complete in Notion, update it
+                if is_submitted and not existing[name]["completed"]:
+                    try:
+                        mark_notion_assignment_completed(existing[name]["page_id"])
+                        print(f"   ✓ Marked complete: {name}")
+                        marked_complete += 1
+                    except requests.exceptions.HTTPError as e:
+                        print(f"   ❌ Failed to mark complete: {name} - {e}")
+                else:
+                    skipped += 1
                 continue
             
             # Create in Notion
             try:
-                create_notion_assignment(name, notion_course, due_at)
-                print(f"   ✅ Added: {name}")
+                create_notion_assignment(name, notion_course, due_at, is_submitted)
+                status = "✅ Added (completed)" if is_submitted else "✅ Added"
+                print(f"   {status}: {name}")
                 added += 1
-                existing.add(name)  # Track so we don't add twice
+                existing[name] = {"page_id": None, "completed": is_submitted}
             except requests.exceptions.HTTPError as e:
                 print(f"   ❌ Failed: {name} - {e}")
         
         print()
     
     print("=" * 50)
-    print(f"✨ Sync complete! Added {added} assignments, skipped {skipped} duplicates.")
+    print(f"✨ Sync complete! Added {added}, marked complete {marked_complete}, skipped {skipped}.")
 
 
 if __name__ == "__main__":
