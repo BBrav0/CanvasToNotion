@@ -7,6 +7,7 @@ Syncs assignments from Canvas LMS to a Notion database.
 import os
 import requests
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -129,12 +130,13 @@ def create_notion_assignment(assignment_name, course_name, due_date, is_submitte
     
     # Add due date if it exists
     if due_date:
-        # Parse Canvas date format and convert to Notion format
+        # Parse Canvas date (UTC) and convert to EST
         try:
-            dt = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+            dt_utc = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+            dt_est = dt_utc.astimezone(ZoneInfo("America/New_York"))
             properties["Due Date"] = {
                 "date": {
-                    "start": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "start": dt_est.strftime("%Y-%m-%dT%H:%M:%S"),
                     "time_zone": "America/New_York"
                 }
             }
