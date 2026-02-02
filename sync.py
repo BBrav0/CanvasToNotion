@@ -5,6 +5,7 @@ Syncs assignments from Canvas LMS to a Notion database.
 """
 
 import os
+import time
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -257,6 +258,8 @@ if __name__ == "__main__":
     if not all([NOTION_KEY, CANVAS_KEY, NOTION_DB, CANVAS_URL]):
         print("❌ Missing environment variables!")
         print("   Make sure .env contains: NOTION_KEY, CANVAS_KEY, NOTION_DB, CANVAS_URL")
+        time.sleep(2)
         exit(1)
     
     sync()
+    time.sleep(2)
