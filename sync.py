@@ -62,24 +62,29 @@ def get_canvas_assignments(course_id):
 
 
 def get_existing_notion_assignments():
-    """Get all assignments already in Notion with their page IDs and completion status."""
+    """Get all assignments already in Notion with their page IDs, completion status, and due dates."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB}/query"
-    
+
     response = requests.post(url, headers=notion_headers, json={})
     response.raise_for_status()
-    
+
     existing = {}
     for page in response.json().get("results", []):
         props = page.get("properties", {})
         title_prop = props.get("Assignment", {}).get("title", [])
+        course_prop = props.get("Course", {}).get("select") or {}
+        due_date_prop = props.get("Due Date", {}).get("date") or {}
         if title_prop:
             title = title_prop[0].get("plain_text", "")
+            course = course_prop.get("name", "")
+            due_date = due_date_prop.get("start", "")
             completed = props.get("Completed", {}).get("checkbox", False)
-            existing[title] = {
+            existing[(title, course)] = {
                 "page_id": page.get("id"),
-                "completed": completed
+                "completed": completed,
+                "due_date": due_date,
             }
-    
+
     return existing
 
 
@@ -96,19 +101,38 @@ def get_canvas_submission(course_id, assignment_id):
     return workflow_state in ["submitted", "graded", "pending_review"]
 
 
+def _canvas_due_to_est(due_at):
+    """Convert a Canvas UTC due date string to an EST-formatted string for comparison."""
+    if not due_at:
+        return None
+    try:
+        dt_utc = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        return dt_utc.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%dT%H:%M:%S")
+    except (ValueError, AttributeError):
+        return None
+
+
 def mark_notion_assignment_completed(page_id):
     """Mark an assignment as completed in Notion."""
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    
+
     payload = {
         "properties": {
             "Completed": {"checkbox": True}
         }
     }
-    
+
     response = requests.patch(url, headers=notion_headers, json=payload)
     response.raise_for_status()
-    
+
+    return response.json()
+
+
+def delete_notion_page(page_id):
+    """Archive (soft-delete) a Notion page."""
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    response = requests.patch(url, headers=notion_headers, json={"archived": True})
+    response.raise_for_status()
     return response.json()
 
 
@@ -223,12 +247,26 @@ def sync():
             except requests.exceptions.HTTPError:
                 is_submitted = False
             
-            # Check if already exists in Notion
-            if name in existing:
-                # If submitted but not marked complete in Notion, update it
-                if is_submitted and not existing[name]["completed"]:
+            # Check if already exists in Notion (keyed by title + course)
+            key = (name, notion_course)
+            canvas_due_est = _canvas_due_to_est(due_at)
+
+            if key in existing:
+                entry = existing[key]
+                notion_due = entry["due_date"]
+                # Due date changed — archive old entry and create a fresh one
+                if canvas_due_est and notion_due and canvas_due_est != notion_due:
                     try:
-                        mark_notion_assignment_completed(existing[name]["page_id"])
+                        delete_notion_page(entry["page_id"])
+                        create_notion_assignment(name, notion_course, due_at, is_submitted)
+                        print(f"   🔄 Updated (new due date): {name}")
+                        added += 1
+                        existing[key] = {"page_id": None, "completed": is_submitted, "due_date": canvas_due_est}
+                    except requests.exceptions.HTTPError as e:
+                        print(f"   ❌ Failed to update: {name} - {e}")
+                elif is_submitted and not entry["completed"]:
+                    try:
+                        mark_notion_assignment_completed(entry["page_id"])
                         print(f"   ✓ Marked complete: {name}")
                         marked_complete += 1
                     except requests.exceptions.HTTPError as e:
@@ -236,14 +274,14 @@ def sync():
                 else:
                     skipped += 1
                 continue
-            
+
             # Create in Notion
             try:
                 create_notion_assignment(name, notion_course, due_at, is_submitted)
                 status = "✅ Added (completed)" if is_submitted else "✅ Added"
                 print(f"   {status}: {name}")
                 added += 1
-                existing[name] = {"page_id": None, "completed": is_submitted}
+                existing[key] = {"page_id": None, "completed": is_submitted, "due_date": canvas_due_est}
             except requests.exceptions.HTTPError as e:
                 print(f"   ❌ Failed: {name} - {e}")
         
