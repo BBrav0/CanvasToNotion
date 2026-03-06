@@ -65,27 +65,39 @@ def get_existing_notion_assignments():
     """Get all assignments already in Notion with their page IDs, completion status, and due dates."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB}/query"
 
-    response = requests.post(url, headers=notion_headers, json={})
-    response.raise_for_status()
-
     existing = {}
-    for page in response.json().get("results", []):
-        props = page.get("properties", {})
-        title_prop = props.get("Assignment", {}).get("title", [])
-        course_prop = props.get("Course", {}).get("select") or {}
-        canvas_due_texts = props.get("Canvas Due", {}).get("rich_text", [])
-        due_date_start = (props.get("Due Date", {}).get("date") or {}).get("start")
-        if title_prop:
-            title = title_prop[0].get("plain_text", "")
-            course = course_prop.get("name", "")
-            canvas_due = canvas_due_texts[0].get("plain_text", "") if canvas_due_texts else ""
-            completed = props.get("Completed", {}).get("checkbox", False)
-            existing[(title, course)] = {
-                "page_id": page.get("id"),
-                "completed": completed,
-                "canvas_due": canvas_due,
-                "has_due_date": bool(due_date_start),
-            }
+    next_cursor = None
+
+    while True:
+        body = {}
+        if next_cursor:
+            body["start_cursor"] = next_cursor
+
+        response = requests.post(url, headers=notion_headers, json=body)
+        response.raise_for_status()
+
+        data = response.json()
+        for page in data.get("results", []):
+            props = page.get("properties", {})
+            title_prop = props.get("Assignment", {}).get("title", [])
+            course_prop = props.get("Course", {}).get("select") or {}
+            canvas_due_texts = props.get("Canvas Due", {}).get("rich_text", [])
+            due_date_start = (props.get("Due Date", {}).get("date") or {}).get("start")
+            if title_prop:
+                title = title_prop[0].get("plain_text", "")
+                course = course_prop.get("name", "")
+                canvas_due = canvas_due_texts[0].get("plain_text", "") if canvas_due_texts else ""
+                completed = props.get("Completed", {}).get("checkbox", False)
+                existing[(title, course)] = {
+                    "page_id": page.get("id"),
+                    "completed": completed,
+                    "canvas_due": canvas_due,
+                    "has_due_date": bool(due_date_start),
+                }
+
+        if not data.get("has_more"):
+            break
+        next_cursor = data.get("next_cursor")
 
     return existing
 
